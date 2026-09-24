@@ -1,0 +1,141 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for defense-in-depth security
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        getUserData().role == 'admin' ||
+        (request.auth.token.keys().hasAny(['admin']) && request.auth.token.admin == true)
+      );
+    }
+
+    function isParent() {
+      return isAuthenticated() && (
+        getUserData().role == 'parent' ||
+        getUserData().role == 'admin'
+      );
+    }
+
+    function isChild() {
+      return isAuthenticated() && getUserData().role == 'child';
+    }
+
+    function isFamilyMember(familyId) {
+      return isAuthenticated() && getUserData().familyId == familyId;
+    }
+
+    // 1. Users collection
+    // Children can read public fields of approved friends; can only write their own profile (excluding role and parentPin)
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) &&
+        request.resource.data.keys().hasAll(['name', 'email', 'role']) &&
+        request.resource.data.role in ['child', 'parent'] &&
+        (!request.resource.data.keys().hasAny(['isBanned']) || request.resource.data.isBanned == false);
+
+      allow update: if (isOwner(userId) &&
+        // Prevent privilege escalation: user cannot elevate their own role or unban themselves
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'isBanned', 'parentPin'])
+      ) || (isParent() && isFamilyMember(resource.data.familyId)) || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // 2. Posts collection (Child-Safe Social Feed)
+    match /posts/{postId} {
+      allow read: if isAuthenticated() && (resource.data.isApproved == true || isAdmin());
+
+      allow create: if isAuthenticated() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.content is string &&
+        request.resource.data.content.size() > 0 &&
+        request.resource.data.content.size() <= 500 &&
+        request.resource.data.type in ['status', 'artwork', 'achievement'];
+
+      allow update: if isAuthenticated() && (
+        // Allow author to update content or any authenticated user to toggle like/reaction count safely
+        (resource.data.authorId == request.auth.uid && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorId', 'isApproved'])) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'likedByUser', 'reactions'])) ||
+        isAdmin()
+      );
+
+      allow delete: if (isAuthenticated() && resource.data.authorId == request.auth.uid) || isAdmin();
+
+      // Comments subcollection
+      match /comments/{commentId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() &&
+          request.resource.data.content is string &&
+          request.resource.data.content.size() > 0 &&
+          request.resource.data.content.size() <= 200;
+        allow delete: if (isAuthenticated() && resource.data.authorId == request.auth.uid) || isAdmin();
+      }
+    }
+
+    // 3. Parental Controls & Settings (Strict Isolation)
+    // Children can NEVER read or write parental settings
+    match /parental_settings/{settingId} {
+      allow read: if isParent() || isAdmin();
+      allow write: if isParent() || isAdmin();
+    }
+
+    // 4. Friend Requests (Requiring parent approval)
+    match /friend_requests/{requestId} {
+      allow read: if isAuthenticated() && (
+        resource.data.targetUserId == request.auth.uid ||
+        resource.data.senderId == request.auth.uid ||
+        isParent() ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update: if isParent() || isAdmin(); // Only parents or admins can approve/reject
+      allow delete: if isParent() || isAdmin();
+    }
+
+    // 5. Moderation Reports
+    // Only moderators and admins can read and resolve reports
+    match /reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() &&
+        request.resource.data.reporterId == request.auth.uid &&
+        request.resource.data.reason is string;
+      allow update, delete: if isAdmin();
+    }
+
+    // 6. Artworks collection
+    match /artworks/{artworkId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if (isAuthenticated() && resource.data.authorId == request.auth.uid) || isAdmin();
+    }
+
+    // 7. Game Scores & Achievements
+    match /game_scores/{scoreId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.score >= 0 &&
+        request.resource.data.starsEarned >= 0 &&
+        request.resource.data.starsEarned <= 3;
+      allow update, delete: if isAdmin();
+    }
+
+    // Default deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

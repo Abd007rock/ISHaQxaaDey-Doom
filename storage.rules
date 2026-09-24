@@ -1,0 +1,38 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    function isUnderMaxSize(maxMegabytes) {
+      return request.resource.size <= maxMegabytes * 1024 * 1024;
+    }
+
+    // User Profile Avatars
+    match /users/{userId}/avatar/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) && isImage() && isUnderMaxSize(5);
+    }
+
+    // Kid's Artworks from Creative Studio
+    match /artworks/{userId}/{artworkId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) && isImage() && isUnderMaxSize(5);
+    }
+
+    // Default deny all other uploads
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

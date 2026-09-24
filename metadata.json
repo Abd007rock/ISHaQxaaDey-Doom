@@ -1,0 +1,6 @@
+{
+  "name": "IshaQxaaDey Doom",
+  "description": "Safe, modern, child-friendly social platform with educational mini-games, poems library, toddler learning zone, creative studio, and parental controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
